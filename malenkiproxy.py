@@ -1,94 +1,122 @@
-'''
-Created on Oct 14, 2015
-
-@author: mft
-'''
-
 #!/usr/bin/env python
 import BaseHTTPServer
 import urllib2
 import quopri
 import sys
-
+import ConfigParser
+import argparse
+import traceback
+from urllib2 import HTTPError
+import os
 
 class MalenkiProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
-    def do_HEAD(s):
-        s.send_response(200)
-        s.send_header("Content-type", "text/html")
-        s.end_headers()
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
         
-    def do_POST(s):
-        MalenkiProxyHandler.do_GET(s)    
+    def do_POST(self):
+        MalenkiProxyHandler.do_GET(self)    
     
-    def requesturl(s):
+    def requesturl(self):
         try:
             opener = urllib2.build_opener()
-            opener.addheaders = [('User-agent', s.headers['user-agent'])]
-            response = opener.open(s.path)
+            opener.addheaders = [('User-agent', self.headers['user-agent'])]
+            response = opener.open(self.path)
             return response
+        except HTTPError as e:
+             print "Response: %d: %s" % (e.code , e.reason)            
         except:
             print "urllib2 was not successful"
-            print str(sys.exc_info()[0])
+            traceback.print_exc()
             return None
+        
     
-    def getURLfilename(s):
-        arrurlparts = s.path.split("/")
+    def getURLfilename(self):
+        arrurlparts = self.path.split("/")
         # replace some .. stuff to countermeasure directory traversal (but probably not all)
         newfilename = arrurlparts[len(arrurlparts)-1].replace("..", "")
         if newfilename == "":
             newfilename = "index"
-            
-        return newfilename
+        
+        # but return only 255 chars incase it is too long
+        return newfilename[0:255]
     
-    def do_GET(s):
+    def log_message(self, format, *args):
+        return
+        
+    def do_GET(self):
         """Respond to a GET request."""
         
-        print "Acessing %s" % s.path
+        print "-----------------------------------------------------"
+        print "Request: %s" % self.path
         
-        response = MalenkiProxyHandler.requesturl(s)
+        response = MalenkiProxyHandler.requesturl(self)
         if response == None:
             return
         
         # read data/header
         data = response.read()
         headerdict = response.info().dict
+        code = response.getcode()
+        
+        # print something
+        print "Response: %d" %  code
         
         # get the filename of the current request
-        newfilename = MalenkiProxyHandler.getURLfilename(s)
+        newfilename = MalenkiProxyHandler.getURLfilename(self)
         
         # replace files
-        if newfilename == "duckbox.pdf":
-            # replace file
-            print response.info().dict
-            responsefile = open("wikileaks.pdf", "rb")
-            data = responsefile.read()
-            headerdict["content-length"] = str(len(data))
-            print "new len : %s" % headerdict["content-length"]
-            responsefile.close()
-        else:
-            # save the file
+        for item in config.items("FileReplace"):
+            if newfilename == item[0]:
+                # replace file
+                responsefile = open(item[1], "rb")
+                data = responsefile.read()
+                headerdict["content-length"] = str(len(data))
+                print "Replacing file %s with %s. New length %s Bytes" % (item[0], item[1], headerdict["content-length"])
+                responsefile.close()
+        
+        # save the file
+        if args.save_files == True:
+            if not os.path.exists("files"):
+                os.makedirs("files")
+            print "Saving file %s" % ("files/" + newfilename)
             curfile = open("files/" + newfilename, "wb")
             curfile.write(data)
             curfile.close()
+            
+        # read the returned code and set it        
+        self.send_response(code)
         
-        # read the code        
-        code = response.getcode()
-        s.send_response(code)
-        
+        # set the header
         for headerkey in headerdict:
-            s.send_header(headerkey, headerdict[headerkey])
-        s.end_headers()
+            self.send_header(headerkey, headerdict[headerkey])
+        self.end_headers()
         
-        s.wfile.write(data)        
+        self.wfile.write(data)        
 
 
 if __name__ == '__main__':
-    server_host = 'localhost'
-    server_port = 8080
+    # parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--config', help='specify config file')
+    parser.add_argument('-s', '--save-files', action="store_true", default=False, help='if set, proxy saves every transaction in a file')
+    args = parser.parse_args()
     
-    httpd = BaseHTTPServer.HTTPServer((server_host, server_port), MalenkiProxyHandler)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        httpd.server_close()
-    
+    if args.config == None:
+        parser.print_help()
+    else:
+        # load the config file for replacing files
+        config = ConfigParser.RawConfigParser()
+        config.read(args.config)
+        server_host = config.get('General', 'host')
+        server_port = config.getint('General', 'port')
+        
+        
+        httpd = BaseHTTPServer.HTTPServer((server_host, server_port), MalenkiProxyHandler)
+        try:
+            print "Starting MalenkiProxy..."
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            httpd.server_close()
+        
